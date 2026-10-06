@@ -129,3 +129,13 @@ func mapError(err error) error {
 	}
 	return err
 }
+
+// lookupError maps err like mapError, but replaces go-eventkit's terse
+// not-found text with a message that names the missing item.
+func lookupError(err error, kind, id string) error {
+	err = mapError(err)
+	if errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("%w: no %s has ID %q; it may have been deleted, so list them again to get current IDs", store.ErrNotFound, kind, id)
+	}
+	return err
+}

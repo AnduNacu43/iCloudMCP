@@ -1,101 +1,104 @@
-// Command icloud-mcp is a local MCP server that exposes the Mac's iCloud
-// Calendar and Reminders through Apple's EventKit framework.
-//
-// Phase 0 scaffold: registers get_current_time and list_calendars only, to
-// prove that cgo, EventKit and the permission prompt work on this Mac.
+// Command icloud-mcp is a local MCP server that lets Claude read and write the
+// Calendar events and Reminders on this Mac, including iCloud, through
+// Apple's EventKit framework. It speaks MCP over stdio.
 package main
 
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/BRO3886/go-eventkit/calendar"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/AnduNacu43/iCloudMCP/internal/store/eventkit"
+	"github.com/AnduNacu43/iCloudMCP/internal/tools"
 )
 
-const version = "0.0.1-dev"
-
-type currentTimeOut struct {
-	Now      string `json:"now" jsonschema:"current time in RFC 3339 with the local UTC offset"`
-	TimeZone string `json:"time_zone" jsonschema:"IANA time zone of this Mac"`
-	Today    string `json:"today" jsonschema:"today's date as YYYY-MM-DD"`
-	Weekday  string `json:"weekday" jsonschema:"today's day of the week"`
-}
-
-type calendarOut struct {
-	ID       string `json:"id"`
-	Title    string `json:"title"`
-	Type     string `json:"type"`
-	Source   string `json:"source"`
-	Color    string `json:"color"`
-	ReadOnly bool   `json:"read_only"`
-}
-
-type listCalendarsOut struct {
-	Calendars []calendarOut `json:"calendars"`
-}
+// version is set at build time with -ldflags "-X main.version=v1.2.3".
+var version = ""
 
 func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	os.Exit(run(os.Args[1:], os.Stderr))
+}
 
-	server := mcp.NewServer(&mcp.Implementation{Name: "icloud-mcp", Version: version}, nil)
+func run(args []string, stderr io.Writer) int {
+	fs := flag.NewFlagSet("icloud-mcp", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	logLevel := fs.String("log-level", "info", "log level: debug, info, warn or error (logs go to stderr)")
+	accessTimeout := fs.Duration("access-timeout", eventkit.DefaultAccessTimeout, "how long a tool call waits for macOS to answer a Calendars or Reminders permission request")
+	showVersion := fs.Bool("version", false, "print the version and exit")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *showVersion {
+		fmt.Fprintln(os.Stdout, buildVersion())
+		return 0
+	}
 
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "get_current_time",
-		Description: "Returns the current date, time and time zone of this Mac. Call this before interpreting relative dates such as 'tomorrow' or 'next week'.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
-	}, func(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, currentTimeOut, error) {
-		now := time.Now()
-		return nil, currentTimeOut{
-			Now:      now.Format(time.RFC3339),
-			TimeZone: localZoneName(),
-			Today:    now.Format(time.DateOnly),
-			Weekday:  now.Weekday().String(),
-		}, nil
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(*logLevel)); err != nil {
+		fmt.Fprintf(stderr, "invalid -log-level %q: use debug, info, warn or error\n", *logLevel)
+		return 2
+	}
+	if *accessTimeout <= 0 {
+		fmt.Fprintln(stderr, "-access-timeout must be positive")
+		return 2
+	}
+	// stdout carries the MCP protocol, so logs must only go to stderr.
+	logger := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: level}))
+
+	server := tools.NewServer(tools.Config{
+		Calendars: eventkit.NewCalendarStore(*accessTimeout),
+		Reminders: eventkit.NewReminderStore(*accessTimeout),
+		Version:   buildVersion(),
+		Now:       time.Now,
+		Location:  time.Local,
 	})
-
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "list_calendars",
-		Description: "Lists every calendar on this Mac (iCloud, local, subscribed and others) with its ID and whether it is read-only.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
-	}, func(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, listCalendarsOut, error) {
-		client, err := calendar.New()
-		if err != nil {
-			return nil, listCalendarsOut{}, fmt.Errorf("calendar access failed: %w. Grant access under System Settings > Privacy & Security > Calendars for the app running this server", err)
-		}
-		cals, err := client.Calendars()
-		if err != nil {
-			return nil, listCalendarsOut{}, err
-		}
-		out := listCalendarsOut{Calendars: make([]calendarOut, 0, len(cals))}
-		for _, c := range cals {
-			out.Calendars = append(out.Calendars, calendarOut{
-				ID: c.ID, Title: c.Title, Type: c.Type.String(), Source: c.Source, Color: c.Color, ReadOnly: c.ReadOnly,
-			})
-		}
-		return nil, out, nil
-	})
+	server.AddReceivingMiddleware(tools.LoggingMiddleware(logger))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	logger.Info("starting icloud-mcp", "version", version, "transport", "stdio")
+	logger.Info("starting icloud-mcp", "version", buildVersion(), "transport", "stdio")
 	err := server.Run(ctx, &mcp.StdioTransport{})
 	switch {
 	case err == nil || ctx.Err() != nil || isClientDisconnect(err):
 		logger.Info("session ended")
+		return 0
 	default:
 		logger.Error("server stopped", "error", err)
-		os.Exit(1)
+		return 1
 	}
+}
+
+// buildVersion returns the version set at link time, else the module
+// version recorded by go install, else the VCS revision.
+func buildVersion() string {
+	if version != "" {
+		return version
+	}
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "dev"
+	}
+	if v := info.Main.Version; v != "" && v != "(devel)" {
+		return v
+	}
+	for _, s := range info.Settings {
+		if s.Key == "vcs.revision" && len(s.Value) >= 7 {
+			return "dev-" + s.Value[:7]
+		}
+	}
+	return "dev"
 }
 
 // isClientDisconnect reports whether err means the client closed stdin, which
@@ -103,22 +106,4 @@ func main() {
 // with %v, so errors.Is cannot see it and the message is checked instead.
 func isClientDisconnect(err error) bool {
 	return errors.Is(err, io.EOF) || strings.HasSuffix(err.Error(), ": "+io.EOF.Error())
-}
-
-// localZoneName returns the IANA name of the local time zone, falling back to
-// the abbreviation when the name is not available.
-func localZoneName() string {
-	if name := time.Local.String(); name != "" && name != "Local" {
-		return name
-	}
-	if tz := os.Getenv("TZ"); tz != "" {
-		return tz
-	}
-	if target, err := os.Readlink("/etc/localtime"); err == nil {
-		if _, zone, ok := strings.Cut(target, "zoneinfo/"); ok {
-			return zone
-		}
-	}
-	name, _ := time.Now().Zone()
-	return name
 }
