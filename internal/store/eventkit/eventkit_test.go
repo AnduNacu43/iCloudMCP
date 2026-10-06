@@ -157,3 +157,16 @@ func TestSpanMapping(t *testing.T) {
 		t.Error("span mapping is wrong")
 	}
 }
+
+func TestLookupErrorNamesTheItem(t *testing.T) {
+	err := lookupError(calendar.ErrNotFound, "event", "ABC")
+	if !errors.Is(err, store.ErrNotFound) || !strings.Contains(err.Error(), `no event has ID "ABC"`) {
+		t.Errorf("err = %v", err)
+	}
+	if lookupError(nil, "event", "ABC") != nil {
+		t.Error("nil should stay nil")
+	}
+	if err := lookupError(calendar.ErrImmutable, "event", "ABC"); !errors.Is(err, store.ErrReadOnly) {
+		t.Errorf("other errors keep their mapping, got %v", err)
+	}
+}

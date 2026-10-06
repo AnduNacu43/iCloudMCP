@@ -97,7 +97,7 @@ func (s *ReminderStore) GetReminder(ctx context.Context, id string) (store.Remin
 	}
 	r, err := c.Reminder(id)
 	if err != nil {
-		return store.Reminder{}, mapError(err)
+		return store.Reminder{}, lookupError(err, "reminder", id)
 	}
 	return toReminder(*r), nil
 }
@@ -161,7 +161,7 @@ func (s *ReminderStore) UpdateReminder(ctx context.Context, id string, u store.R
 	}
 	r, err := c.UpdateReminder(id, input)
 	if err != nil {
-		return store.Reminder{}, mapError(err)
+		return store.Reminder{}, lookupError(err, "reminder", id)
 	}
 	return toReminder(*r), nil
 }
@@ -181,7 +181,7 @@ func (s *ReminderStore) SetCompleted(ctx context.Context, id string, completed b
 		r, err = c.UncompleteReminder(id)
 	}
 	if err != nil {
-		return store.Reminder{}, mapError(err)
+		return store.Reminder{}, lookupError(err, "reminder", id)
 	}
 	return toReminder(*r), nil
 }
@@ -194,7 +194,7 @@ func (s *ReminderStore) DeleteReminder(ctx context.Context, id string) error {
 	if err := s.checkWritableReminder(c, id); err != nil {
 		return err
 	}
-	return mapError(c.DeleteReminder(id))
+	return lookupError(c.DeleteReminder(id), "reminder", id)
 }
 
 // checkWritableReminder fails early, with a clear message, when the
@@ -202,7 +202,7 @@ func (s *ReminderStore) DeleteReminder(ctx context.Context, id string) error {
 func (s *ReminderStore) checkWritableReminder(c *reminders.Client, id string) error {
 	r, err := c.Reminder(id)
 	if err != nil {
-		return mapError(err)
+		return lookupError(err, "reminder", id)
 	}
 	lists, err := s.lists(c)
 	if err != nil {

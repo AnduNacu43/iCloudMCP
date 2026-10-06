@@ -81,7 +81,7 @@ func (s *CalendarStore) GetEvent(ctx context.Context, id string) (store.Event, e
 	}
 	e, err := c.Event(id)
 	if err != nil {
-		return store.Event{}, mapError(err)
+		return store.Event{}, lookupError(err, "event", id)
 	}
 	return toEvent(*e), nil
 }
@@ -149,7 +149,7 @@ func (s *CalendarStore) UpdateEvent(ctx context.Context, id string, u store.Even
 	}
 	e, err := c.UpdateEvent(id, input, toSpan(span))
 	if err != nil {
-		return store.Event{}, mapError(err)
+		return store.Event{}, lookupError(err, "event", id)
 	}
 	return toEvent(*e), nil
 }
@@ -162,7 +162,7 @@ func (s *CalendarStore) DeleteEvent(ctx context.Context, id string, span store.S
 	if err := s.checkWritableEvent(c, id, span); err != nil {
 		return err
 	}
-	return mapError(c.DeleteEvent(id, toSpan(span)))
+	return lookupError(c.DeleteEvent(id, toSpan(span)), "event", id)
 }
 
 // checkWritableEvent fails early, with a clear message, for events that a
@@ -171,7 +171,7 @@ func (s *CalendarStore) DeleteEvent(ctx context.Context, id string, span store.S
 func (s *CalendarStore) checkWritableEvent(c *calendar.Client, id string, span store.Span) error {
 	e, err := c.Event(id)
 	if err != nil {
-		return mapError(err)
+		return lookupError(err, "event", id)
 	}
 	// go-eventkit addresses an event by its eventIdentifier, which every
 	// occurrence of a repeating event shares, and resolves it to the first
