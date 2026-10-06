@@ -1,0 +1,7 @@
+# Build output
+/icloud-mcp
+*.test
+*.out
+
+# macOS
+.DS_Store
